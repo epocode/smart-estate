@@ -369,6 +369,235 @@ source .venv/bin/activate
 4. **展示层面**：可视化大屏直观展示全国/城市/区域房价情况
 5. **实用层面**：帮助用户快速找到合适房源，辅助投资决策
 
+## 部署方式
+
+### 方式一：本地开发部署（SQLite，零配置）
+
+无需安装 MySQL，适合快速体验和开发调试。项目会自动检测 MySQL 是否可用，不可用时降级为 SQLite。
+
+```bash
+# 1. 安装依赖
+uv sync
+
+# 2. 数据库迁移
+uv run python manage.py migrate
+
+# 3. 填充测试数据
+uv run python scripts/seed_django.py
+
+# 4. 启动服务
+uv run python manage.py runserver
+```
+
+访问 http://127.0.0.1:8000 即可查看。
+
+### 方式二：本地开发部署（MySQL）
+
+适合需要完整功能（爬虫入库、大数据量）的场景。
+
+```bash
+# 1. 安装并启动 MySQL 8.0、Redis 6.0
+
+# 2. 修改数据库配置
+# 编辑 config/database.yml，填入实际的 MySQL 连接信息
+# database:
+#   host: 127.0.0.1
+#   port: 3306
+#   name: smart_estate
+#   user: root
+#   password: your_actual_password
+#   charset: utf8mb4
+
+# 3. 安装依赖
+uv sync
+
+# 4. 初始化数据库（创建库和表）
+uv run python scripts/init_project.py
+
+# 5. Django 迁移
+uv run python manage.py migrate
+
+# 6. 填充测试数据（或运行爬虫采集真实数据）
+uv run python scripts/seed_django.py
+# 或: uv run python scripts/start_crawler.py --city 北京 --pages 5
+
+# 7. 启动服务
+uv run python manage.py runserver
+```
+
+### 方式三：生产环境部署（Linux 服务器）
+
+使用 Gunicorn + Nginx 部署，适合对外提供服务。
+
+#### 1. 服务器准备
+
+```bash
+# 安装系统依赖
+sudo apt update
+sudo apt install -y mysql-server redis-server nginx
+
+# 安装 uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+#### 2. 项目部署
+
+```bash
+# 克隆项目
+git clone git@github.com:epocode/smart-estate.git /opt/smart-estate
+cd /opt/smart-estate
+
+# 安装依赖
+uv sync --no-dev
+
+# 配置数据库
+cp config/database.yml config/database.yml.bak
+# 编辑 config/database.yml 填入生产数据库信息
+
+# 初始化数据库
+uv run python scripts/init_project.py
+uv run python manage.py migrate
+
+# 收集静态文件
+uv run python manage.py collectstatic --noinput
+```
+
+#### 3. 配置 Gunicorn
+
+```bash
+# 安装 gunicorn
+uv add gunicorn
+
+# 启动（开发测试）
+uv run gunicorn web.wsgi:application --bind 0.0.0.0:8000 --workers 4
+```
+
+创建 systemd 服务文件 `/etc/systemd/system/smart-estate.service`：
+
+```ini
+[Unit]
+Description=Smart Estate Django App
+After=network.target mysql.service redis.service
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/smart-estate
+ExecStart=/opt/smart-estate/.venv/bin/gunicorn web.wsgi:application --bind 127.0.0.1:8000 --workers 4 --timeout 120
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable smart-estate
+sudo systemctl start smart-estate
+```
+
+#### 4. 配置 Nginx
+
+创建 `/etc/nginx/sites-available/smart-estate`：
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+
+    location /static/ {
+        alias /opt/smart-estate/staticfiles/;
+        expires 30d;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+```bash
+sudo ln -s /etc/nginx/sites-available/smart-estate /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+#### 5. 生产环境注意事项
+
+在 `web/settings.py` 中修改以下配置：
+
+```python
+DEBUG = False
+ALLOWED_HOSTS = ['your-domain.com', 'your-server-ip']
+SECRET_KEY = 'your-production-secret-key'  # 使用随机生成的密钥
+```
+
+### 方式四：Docker 部署（可选）
+
+如需容器化部署，可创建 `Dockerfile`：
+
+```dockerfile
+FROM python:3.13-slim
+
+WORKDIR /app
+
+# 安装 uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# 安装依赖
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
+
+# 复制项目
+COPY . .
+
+# 收集静态文件
+RUN uv run python manage.py collectstatic --noinput
+
+EXPOSE 8000
+CMD ["uv", "run", "gunicorn", "web.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "4"]
+```
+
+配合 `docker-compose.yml`：
+
+```yaml
+version: '3.8'
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+    environment:
+      - DJANGO_SETTINGS_MODULE=web.settings
+
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: smart_estate_pwd
+      MYSQL_DATABASE: smart_estate
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/init_db.sql:/docker-entrypoint-initdb.d/init.sql
+
+  redis:
+    image: redis:7-alpine
+
+volumes:
+  mysql_data:
+```
+
+```bash
+docker-compose up -d
+```
+
 ## License
 
 MIT
