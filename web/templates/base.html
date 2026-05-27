@@ -46,6 +46,11 @@
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link {% if request.resolver_match.url_name == 'crawler_index' %}active{% endif %}" href="{% url 'house:crawler_index' %}">
+                            <i class="bi bi-robot"></i> 爬虫管理
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link" href="{% url 'house:search' %}">
                             <i class="bi bi-search"></i> 搜索
                         </a>

@@ -12,7 +12,7 @@ SPIDER_MODULES = ['estate_spider.spiders']
 NEWSPIDER_MODULE = 'estate_spider.spiders'
 
 # Crawl responsibly
-ROBOTSTXT_OBEY = True
+ROBOTSTXT_OBEY = False
 
 # Configure maximum concurrent requests
 CONCURRENT_REQUESTS = 4
@@ -38,7 +38,7 @@ DOWNLOADER_MIDDLEWARES = {
 # Configure item pipelines
 ITEM_PIPELINES = {
     'estate_spider.pipelines.DataCleanPipeline': 200,
-    'estate_spider.pipelines.MySQLPipeline': 300,
+    'estate_spider.pipelines.DjangoORMPipeline': 300,
 }
 
 # MySQL Configuration
@@ -62,5 +62,5 @@ LOG_FORMAT = '%(asctime)s [%(name)s] %(levelname)s: %(message)s'
 
 # Request fingerprinter
 REQUEST_FINGERPRINTER_IMPLEMENTATION = "2.7"
-TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
+TWISTED_REACTOR = "twisted.internet.selectreactor.SelectReactor"
 FEED_EXPORT_ENCODING = "utf-8"

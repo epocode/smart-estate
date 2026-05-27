@@ -140,7 +140,7 @@
 <script>
     // 城市房价排行柱状图
     var cityPriceChart = echarts.init(document.getElementById('cityPriceChart'));
-    var cityData = {{ city_stats|safe }};
+    var cityData = JSON.parse('{{ city_stats_json|escapejs }}');
 
     var cityNames = cityData.map(function(item) { return item.name; });
     var cityPrices = cityData.map(function(item) { return item.avg_unit_price ? Math.round(item.avg_unit_price) : 0; });

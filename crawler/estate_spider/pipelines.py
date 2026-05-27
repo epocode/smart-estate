@@ -1,15 +1,27 @@
 """
 Item pipelines for data cleaning and storage.
+Supports both Django ORM (SQLite/MySQL) and direct MySQL connection.
 """
+import os
+import sys
 import re
-import pymysql
+
 from scrapy.exceptions import DropItem
+
+# Add project root to path so we can import Django models
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, PROJECT_ROOT)
+
+# Setup Django
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'web.settings')
+import django
+django.setup()
 
 
 class DataCleanPipeline:
     """数据清洗管道"""
 
-    def process_item(self, item, spider):
+    def process_item(self, item):
         # 标题不能为空
         if not item.get('title'):
             raise DropItem("Missing title")
@@ -59,128 +71,77 @@ class DataCleanPipeline:
         return item
 
 
-class MySQLPipeline:
-    """MySQL 存储管道"""
-
-    def __init__(self, host, port, user, password, database):
-        self.host = host
-        self.port = port
-        self.user = user
-        self.password = password
-        self.database = database
-        self.conn = None
-        self.cursor = None
+class DjangoORMPipeline:
+    """通过 Django ORM 存储数据（兼容 SQLite 和 MySQL）"""
 
     @classmethod
     def from_crawler(cls, crawler):
-        return cls(
-            host=crawler.settings.get('MYSQL_HOST', '127.0.0.1'),
-            port=crawler.settings.getint('MYSQL_PORT', 3306),
-            user=crawler.settings.get('MYSQL_USER', 'root'),
-            password=crawler.settings.get('MYSQL_PASSWORD', ''),
-            database=crawler.settings.get('MYSQL_DATABASE', 'smart_estate'),
-        )
+        return cls()
 
-    def open_spider(self, spider):
-        self.conn = pymysql.connect(
-            host=self.host,
-            port=self.port,
-            user=self.user,
-            password=self.password,
-            database=self.database,
-            charset='utf8mb4',
-            cursorclass=pymysql.cursors.DictCursor,
-        )
-        self.cursor = self.conn.cursor()
+    def open_spider(self):
+        from web.apps.house.models import City, District, Community, House
+        self.City = City
+        self.District = District
+        self.Community = Community
+        self.House = House
 
-    def close_spider(self, spider):
-        if self.conn:
-            self.conn.close()
-
-    def process_item(self, item, spider):
-        try:
-            # 获取或创建城市
-            city_id = self._get_or_create_city(item.get('city', '未知'))
-            # 获取或创建区域
-            district_id = self._get_or_create_district(item.get('district', '未知'), city_id)
-            # 获取或创建小区
-            community_id = self._get_or_create_community(
-                item.get('community', '未知'),
-                district_id,
-                item.get('longitude'),
-                item.get('latitude'),
-                item.get('house_year'),
-            )
-
-            # 插入房源数据
-            sql = """
-                INSERT INTO house (title, community_id, total_price, unit_price, area,
-                    layout, orientation, floor, total_floor, decoration, elevator,
-                    listing_date, house_year, source_url)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """
-            self.cursor.execute(sql, (
-                item.get('title'),
-                community_id,
-                item.get('total_price'),
-                item.get('unit_price'),
-                item.get('area'),
-                item.get('layout'),
-                item.get('orientation'),
-                item.get('floor'),
-                item.get('total_floor'),
-                item.get('decoration'),
-                item.get('elevator', 0),
-                item.get('listing_date'),
-                item.get('house_year'),
-                item.get('source_url'),
-            ))
-            self.conn.commit()
-
-        except Exception as e:
-            self.conn.rollback()
-            spider.logger.error(f"Error saving item: {e}")
-
+    def process_item(self, item):
+        from asgiref.sync import sync_to_async
+        # Use synchronous DB access wrapped for async context
+        self._save_item(item)
         return item
 
-    def _get_or_create_city(self, name):
-        self.cursor.execute("SELECT id FROM city WHERE name = %s", (name,))
-        result = self.cursor.fetchone()
-        if result:
-            return result['id']
+    def _save_item(self, item):
+        from django.db import connection
+        # Force a new connection in this context
+        connection.ensure_connection()
+        try:
+            # 获取或创建城市
+            city, _ = self.City.objects.get_or_create(
+                name=item.get('city', '未知'),
+            )
 
-        self.cursor.execute("INSERT INTO city (name) VALUES (%s)", (name,))
-        self.conn.commit()
-        return self.cursor.lastrowid
+            # 获取或创建区域
+            district_name = item.get('district', '').strip()
+            if not district_name:
+                district_name = '未知'
+            district, _ = self.District.objects.get_or_create(
+                name=district_name,
+                city=city,
+            )
 
-    def _get_or_create_district(self, name, city_id):
-        self.cursor.execute(
-            "SELECT id FROM district WHERE name = %s AND city_id = %s",
-            (name, city_id)
-        )
-        result = self.cursor.fetchone()
-        if result:
-            return result['id']
+            # 获取或创建小区
+            community_name = item.get('community', '').strip()
+            if not community_name:
+                community_name = '未知'
+            community, _ = self.Community.objects.get_or_create(
+                name=community_name,
+                district=district,
+                defaults={
+                    'longitude': item.get('longitude'),
+                    'latitude': item.get('latitude'),
+                    'build_year': item.get('house_year'),
+                }
+            )
 
-        self.cursor.execute(
-            "INSERT INTO district (name, city_id) VALUES (%s, %s)",
-            (name, city_id)
-        )
-        self.conn.commit()
-        return self.cursor.lastrowid
+            # 创建房源
+            self.House.objects.create(
+                title=item.get('title', ''),
+                community=community,
+                total_price=item.get('total_price'),
+                unit_price=item.get('unit_price'),
+                area=item.get('area'),
+                layout=item.get('layout'),
+                orientation=item.get('orientation'),
+                floor=item.get('floor'),
+                total_floor=item.get('total_floor'),
+                decoration=item.get('decoration'),
+                elevator=bool(item.get('elevator', 0)),
+                listing_date=item.get('listing_date') or None,
+                house_year=item.get('house_year'),
+                source_url=item.get('source_url'),
+            )
 
-    def _get_or_create_community(self, name, district_id, longitude=None, latitude=None, build_year=None):
-        self.cursor.execute(
-            "SELECT id FROM community WHERE name = %s AND district_id = %s",
-            (name, district_id)
-        )
-        result = self.cursor.fetchone()
-        if result:
-            return result['id']
-
-        self.cursor.execute(
-            "INSERT INTO community (name, district_id, longitude, latitude, build_year) VALUES (%s, %s, %s, %s, %s)",
-            (name, district_id, longitude, latitude, build_year)
-        )
-        self.conn.commit()
-        return self.cursor.lastrowid
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Error saving item: {e}")

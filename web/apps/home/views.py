@@ -19,12 +19,22 @@ def index(request):
         avg_unit_price=Avg('districts__communities__houses__unit_price', filter=Q(districts__communities__houses__status=1))
     ).values('name', 'house_count', 'avg_unit_price')
 
+    import json
+    from decimal import Decimal
+
+    # 序列化为 JSON 安全的格式
+    city_stats_list = list(city_stats)
+    for item in city_stats_list:
+        if item['avg_unit_price'] is not None:
+            item['avg_unit_price'] = float(item['avg_unit_price'])
+
     context = {
         'total_houses': total_houses,
         'total_cities': total_cities,
         'total_communities': total_communities,
         'avg_price': round(avg_price, 2),
-        'city_stats': list(city_stats),
+        'city_stats': city_stats_list,
+        'city_stats_json': json.dumps(city_stats_list, ensure_ascii=False),
     }
     return render(request, 'home.html', context)
 

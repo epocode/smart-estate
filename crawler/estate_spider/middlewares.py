@@ -17,5 +17,9 @@ class RandomUserAgentMiddleware:
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0 Safari/537.36',
     ]
 
-    def process_request(self, request, spider):
+    @classmethod
+    def from_crawler(cls, crawler):
+        return cls()
+
+    def process_request(self, request):
         request.headers['User-Agent'] = random.choice(self.USER_AGENTS)

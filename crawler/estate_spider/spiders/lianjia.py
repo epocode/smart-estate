@@ -1,6 +1,6 @@
 """
 链家二手房爬虫
-采集链家网二手房数据
+从列表页直接提取房源数据
 """
 import re
 import scrapy
@@ -30,91 +30,60 @@ class LianjiaSpider(scrapy.Spider):
         self.city = city
         self.pages = int(pages)
         self.city_code = self.CITY_MAP.get(city, 'bj')
+        self.start_urls = [
+            f'https://{self.city_code}.lianjia.com/ershoufang/pg{page}/'
+            for page in range(1, self.pages + 1)
+        ]
 
-    def start_requests(self):
-        """生成起始请求"""
-        base_url = f'https://{self.city_code}.lianjia.com/ershoufang/pg{{page}}/'
-        for page in range(1, self.pages + 1):
-            url = base_url.format(page=page)
-            yield scrapy.Request(url, callback=self.parse_list, meta={'city': self.city})
+    def parse(self, response):
+        """从列表页直接提取房源数据"""
+        listings = response.css('ul.sellListContent li.clear')
+        self.logger.info(f"Found {len(listings)} listings on {response.url}")
 
-    def parse_list(self, response):
-        """解析房源列表页"""
-        city = response.meta['city']
-        house_list = response.xpath('//ul[@class="sellListContent"]/li[@class="clear"]')
+        for li in listings:
+            item = HouseItem()
+            item['city'] = self.city
+            item['source_url'] = li.css('div.title a::attr(href)').get('')
 
-        for house in house_list:
-            detail_url = house.xpath('.//div[@class="title"]/a/@href').get()
-            if detail_url:
-                yield scrapy.Request(
-                    detail_url,
-                    callback=self.parse_detail,
-                    meta={'city': city}
-                )
+            # 标题
+            item['title'] = li.css('div.title a::text').get('').strip()
 
-    def parse_detail(self, response):
-        """解析房源详情页"""
-        item = HouseItem()
+            # 价格
+            item['total_price'] = li.css('div.totalPrice span::text').get('')
+            item['unit_price'] = li.css('div.unitPrice span::text').get('')
 
-        item['city'] = response.meta['city']
-        item['source_url'] = response.url
+            # 房屋信息: "2室1厅 | 89.3平米 | 南 | 精装 | 高楼层(共18层) ..."
+            house_info = li.css('div.houseInfo::text').get('')
+            if not house_info:
+                # 备用选择器
+                house_info = ' | '.join(li.css('div.address div.houseInfo a::text').getall())
 
-        # 标题
-        item['title'] = response.xpath('//h1[@class="main"]/text()').get('').strip()
-
-        # 价格
-        total_price = response.xpath('//span[@class="total"]/text()').get('')
-        item['total_price'] = total_price
-
-        unit_price = response.xpath('//span[@class="unitPriceValue"]/text()').get('')
-        item['unit_price'] = unit_price
-
-        # 基本信息
-        info_items = response.xpath('//div[@class="base"]//li')
-        for info in info_items:
-            label = info.xpath('./span/text()').get('')
-            value = info.xpath('./text()').get('').strip()
-
-            if '户型' in label:
-                item['layout'] = value
-            elif '建筑面积' in label:
-                item['area'] = value
-            elif '朝向' in label or '房屋朝向' in label:
-                item['orientation'] = value
-            elif '装修' in label:
-                item['decoration'] = value
-            elif '楼层' in label:
-                item['floor'] = value
-                # 提取总楼层
-                floor_match = re.search(r'共(\d+)层', value)
+            parts = [p.strip() for p in house_info.split('|')]
+            if len(parts) >= 1:
+                item['layout'] = parts[0].strip()
+            if len(parts) >= 2:
+                item['area'] = parts[1].strip()
+            if len(parts) >= 3:
+                item['orientation'] = parts[2].strip()
+            if len(parts) >= 4:
+                item['decoration'] = parts[3].strip()
+            if len(parts) >= 5:
+                floor_info = parts[4].strip()
+                item['floor'] = floor_info
+                floor_match = re.search(r'共(\d+)层', floor_info)
                 if floor_match:
                     item['total_floor'] = floor_match.group(1)
-            elif '电梯' in label:
-                item['elevator'] = value
 
-        # 位置信息
-        area_info = response.xpath('//div[@class="areaName"]//a/text()').getall()
-        if len(area_info) >= 1:
-            item['district'] = area_info[0].strip()
-        if len(area_info) >= 2:
-            item['community'] = area_info[1].strip()
-        else:
-            community = response.xpath('//div[@class="communityName"]//a/text()').get('')
-            item['community'] = community.strip()
+            # 位置信息
+            position_parts = li.css('div.positionInfo a::text').getall()
+            if position_parts:
+                item['community'] = position_parts[0].strip()
+            if len(position_parts) >= 2:
+                item['district'] = position_parts[1].strip()
 
-        # 挂牌日期
-        listing_date = response.xpath(
-            '//div[@class="transaction"]//li[contains(.,"挂牌时间")]//span[2]/text()'
-        ).get('')
-        item['listing_date'] = listing_date.strip() if listing_date else None
+            # 如果没有从 positionInfo 获取到区域，尝试其他方式
+            if not item.get('district'):
+                flood_info = li.css('div.flood div.positionInfo::text').get('')
+                item['district'] = flood_info.strip(' -\t\n')
 
-        # 建筑年代
-        build_year = response.xpath(
-            '//div[@class="transaction"]//li[contains(.,"建成年代")]//span[2]/text()'
-        ).get('')
-        if build_year:
-            year_match = re.search(r'(\d{4})', build_year)
-            if year_match:
-                item['house_year'] = int(year_match.group(1))
-
-        yield item
+            yield item
